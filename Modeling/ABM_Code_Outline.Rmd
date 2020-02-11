@@ -1,0 +1,256 @@
+```{r}
+#Minor edits from original code by Mary Bushman
+####### full (nested) model #########
+influenza<-function(pars){
+  #pars=list(D,N,max.age,w,vacc.days,vacc.freq,init.freq,intr.day,x_L,x_V,x_LV,p.transmit)
+  with(as.list(pars),{
+    library(deSolve)
+    ##### within-host model parameters #####
+    beta=3e-5
+    k_M=4
+    k_R=0.2
+    delta=1
+    p=0.04
+    c=3
+    sigma_M=1
+    d_M=0.2
+    phi_M=1
+    gamma=0.3
+    d_A=1.7
+    rho=2.15
+    phi=5
+    alpha=0.4
+    r=0.07
+    mu=1.2
+    d_R=0.05
+    y=0.25
+    z=1e8
+    a<-0.25 #attenuation (reduction in burst size)
+    DELTA<-0.2
+    ####### within-host model ##########
+    withinhost<-function(t,start,pars){
+      with(as.list(c(start,pars)),{
+        dCdt=-beta*C*((1-x_V)*V+(1-x_L)*L)-k_M*M*C-y*C+z
+        dI_Vdt=beta*C*(1-x_V)*V-k_R*T_R*I_V-delta*I_V
+        dI_Ldt=beta*C*(1-x_L)*L-k_R*T_R*I_L-delta*I_L
+        dVdt=p*I_V-c*V
+        dLdt<-a*p*I_L-c*L
+        dMdt=((1-M)*sigma_M*(I_V+I_L))/(phi_M+(I_V+I_L))-d_M*M
+        dAdt=gamma*(V+L)-d_A*A
+        dT_Pdt=-rho*T_P*(A/(phi+A))
+        dT_Edt=rho*(T_P+T_E+T_M)*(A/(phi+A))-(alpha+r)*T_E*(1-(A/(phi+A)))-mu*T_E*M
+        dT_Mdt=r*T_E*(1-(A/(phi+A)))
+        dT_Rdt=mu*T_E*M-d_R*T_R
+        return(list(c(dCdt,dI_Vdt,dI_Ldt,dVdt,dLdt,dMdt,dAdt,dT_Pdt,dT_Edt,dT_Mdt,dT_Rdt)))
+      }) 
+    }
+    ######## transmission probability function ########
+    trans.prob<-function(logV){ #logV=log10(V)
+      tp<-(logV^4.8)/((2.6^4.8)+(logV^4.8))
+      return(tp)
+    }
+    ####################
+    vaccinated<-rep(0,N) #change value i to 1 if host i has been vaccinated
+    infected<-rep(0,N) #change value i to 1 if host i has been infected (with circulating virus)
+    wh.state<-array(0,dim=c(D/DELTA,12,N))
+    age<-runif(N,min=0,max=max.age)
+    for(i in 1:D){
+      if(i==1){
+        start.conditions<-array(rep(c(0,4e8,0,0,0,0,0,0,1,0,0,0),rep(N,12)),dim=c(N,12))}else{
+          age<-age+1
+          die<-which(age>max.age)
+          age[die]<-0
+          for(j in die){
+            start.conditions[j,]<-c(0,4e8,0,0,0,0,0,0,1,0,0,0)
+          }
+        }
+      if(i==intr.day){
+        infect<-sample(1:N,round(init.freq*N))
+        start.conditions[infect,5]<-1
+      }else{}
+      if(i%in%vacc.days){
+        unvaccinated<-which(vaccinated==0)
+        if(length(unvaccinated<=round(vacc.freq*N))){
+          vaccinate<-sample(unvaccinated,round(vacc.freq*N),replace=F)
+          vaccinated[vaccinate]<-1
+          start.conditions[vaccinate,6]<-1
+        }else{}
+      }else{}
+      ###########
+      if(i==1){}else{
+        change<-start.conditions-penultimate
+        thresholds<-c(0,0,1,1,1,1,1e-6,1e-4,1e-6,1e-6,0,0)
+        for(x in 1:12){
+          start.conditions[which(change[,x]<0&start.conditions[,x]<thresholds[x]),x]<-0}
+      }
+      infected[which(colSums(wh.state[,5,])!=0)]<-1
+      ############
+      start.list<-vector("list",N)
+      times.list<-vector("list",N)
+      pars.list<-vector("list",N)
+      func.list<-vector("list",N)
+      for(j in 1:N){
+        start.list[[j]]<-c(C=start.conditions[j,2],I_V=start.conditions[j,3],I_L=start.conditions[j,4],V=start.conditions[j,5],L=start.conditions[j,6],M=start.conditions[j,7],A=start.conditions[j,8],T_P=start.conditions[j,9],T_E=start.conditions[j,10],T_M=start.conditions[j,11],T_R=start.conditions[j,12])
+        times.list[[j]]<-seq(i-1,i,by=DELTA)
+        pars.list[[j]]<-c(beta=beta,k_M=k_M,k_R=k_R,delta=delta,p=p,c=c,sigma_M=sigma_M,d_M=d_M,phi_M=phi_M,gamma=gamma,d_A=d_A,rho=rho,phi=phi,alpha=alpha,r=r,mu=mu,d_R=d_R,y=y,z=z,a=a,x_V=x_V+x_LV*infected[j],x_L=x_L)
+        func.list[[j]]<-withinhost
+      }
+      result<-mapply(ode,start.list,times.list,func.list,pars.list)
+      result.reformat<-array(NA,dim=c((1/DELTA)+1,12,N))
+      result.reformat[1:((1/DELTA)+1),,]<-unlist(result)
+      wh.state[(((i-1)/DELTA)+1):(i/DELTA),,]<-result.reformat[1:(1/DELTA),,]
+      start.conditions<-t(result.reformat[(1/DELTA)+1,,])
+      penultimate<-t(result.reformat[1/DELTA,,])
+      ######### transmission ######
+      logV<-log10(start.conditions[,5])
+      logV[which(is.na(logV))]<-0 
+      infect.probs<-p.transmit*sapply(logV,trans.prob)
+      contacts<-matrix(NA,nrow=N*w/2,ncol=2)
+      contacts[,1]<-sample(1:N,nrow(contacts),replace=T)
+      for(i in 1:nrow(contacts)){
+        contacts[i,2]<-sample(setdiff(1:N,contacts[i,1]),1)
+      }
+      for(j in 1:N){
+        contacts_j<-union(contacts[which(contacts[,2]==j),1],contacts[which(contacts[,1]==j),2])
+        if(length(contacts_j!=0)){
+          acquire<-runif(length(contacts_j),0,1)
+          start.conditions[j,5]<-start.conditions[j,5]+length(which(acquire<=infect.probs[contacts_j]))
+        }else{}
+      }
+    }
+    save(wh.state,file=file)
+  })
+} #### THIS IS WHERE THE FUNCTION INFLUENZA ENDS, THIS RUNS FOR MULTIPLE VALUES OF x_L AS SPECIFIED BY pars.list LATER
+
+########### simulations ########
+
+#influenza<-function(pars){
+#pars=list(D,N,max.age,w,vacc.days,vacc.freq,init.freq,intr.day,x_L,x_V,x_LV,p.transmit)
+xL.vals<-c(0,0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55)
+length(xL.vals)
+pars.list<-vector("list",12)
+for(i in 1:12){
+  pars.list[[i]]<-list(D=180,N=4500,max.age=1500,w=4,vacc.days=1,vacc.freq=0.5,init.freq=0.05,intr.day=10,x_L=xL.vals[i],x_V=0,x_LV=0,p.transmit=0.08,file=paste("output_",i))  
+}
+
+library(parallel)
+detectCores()
+cl<-makeCluster(6)
+
+starttime<-proc.time() #SAVES THE CPU START TIME
+parLapply(cl,pars.list,influenza)
+#RUNS THE FUNCTION INFLUENZA FOR ALL THE DIFFERENT PARAMETERS AS GIVEN IN pars.list (WHICH CURRENTLY ONLY CHANGES ANTIGENETIC DISTANCE)... parLapply applies a fcn over a list but in a parellel rather than sequential manner to speed up computation (hopefully)
+proc.time()-starttime #CALCULATES RUN TIME
+
+# ################## analysis ############
+output<-vector("list",12)
+for(i in 1:12){
+  outputfile<-paste("output_",i)
+  load(outputfile)
+  output[[i]]<-wh.state
+  rm(wh.state)
+}
+
+##################
+colors<-c("black","darkred","blue","green","purple","deeppink","darkturquoise","navyblue","gray50","orange","brown")
+
+par(mfrow=c(1,1))
+nmbr.inf<-matrix(NA,nrow=900,ncol=12)
+for(i in 1:12){
+  for(j in 1:900){
+    nmbr.inf[j,i]<-length(which(output[[i]][j,3,]>0))
+  }
+}
+time<-seq(0,179.8,by=0.2)
+
+plot(c(0,180),c(0,max(nmbr.inf)),type="n",xlab="time (days)",ylab="number people infected")
+#all timepoints
+for(i in 1:12){
+  points(time,nmbr.inf[,i],type="l",col=colors[i])
+  points(locator(1),type="n")
+}
+
+#one timepoint per day
+daily<-seq(1,900,by=5)
+for(i in 1:12){
+  points(time[daily],nmbr.inf[daily,i],type="l",col=colors[i])
+  points(locator(1),type="n")
+}
+
+#12-panel figure
+par(mfrow=c(3,4),mar=c(0.75,0.75,0,0),oma=c(6,7,5,2))
+for(i in 1:12){
+  plot(time[daily],nmbr.inf[daily,i],type="l",col="black",lwd=2,ylim=c(0,750),xaxt="n",yaxt="n",xlim=c(-10,190))
+  text(90,680,labels=paste("distance = ",100*(1-xL.vals[i]),"%",sep=""),adj=0.5,cex=1.6,col="black")
+  if(i%in%c(1,5,9)){
+    axis(side=2,at=c(0,100,200,300,400,500,600),labels=c("0","","200","","400","","600"),tcl=-0.4,las=1,cex.axis=1.3,line=0)
+  }
+  if(i%in%9:12){
+    axis(side=1,at=c(0,30,60,90,120,150,180),labels=c("0","","60","","120","","180"),tcl=-0.4,las=1,cex.axis=1.3,line=0)
+  }
+}
+mtext("time (days)",side=1,adj=0.5,outer=T,cex=1.4,line=3.5)
+mtext("number people infected",side=2,adj=0.5,outer=T,cex=1.4,line=4)
+mtext("influenza dynamics - varying antigenic distance",side=3,adj=0.5,outer=T,cex=1.6,line=2)
+
+#######
+par(mfrow=c(1,1),mar=c(4.5,4.5,1,1))
+nmbr.inf.auc<-colSums(nmbr.inf[daily,])
+plot(nmbr.inf.auc/4500,type="o",pch=16,lwd=2,xlab="antigenic distance (%)",ylab="total infection-days per person",ylim=c(0,ceiling(max(nmbr.inf.auc/4500))),cex.lab=1.5,xaxt="n",yaxt="n")
+axis(side=1,at=1:12,labels=c("100","95","90","85","80","75","70","65","60","55","50","45"),cex.axis=1.2)
+axis(side=2,at=0:6,labels=0:6,las=1,cex.axis=1.2)
+
+#total infections over time
+total.inf<-rep(NA,12)
+for(i in 1:12){ #this is the number of xL.vals
+  i_v<-output[[i]][,3,]
+  inf.length<-rep(NA,4500) #4500 is N
+  for(j in 1:4500){
+    ivj<-i_v[,j]
+    if(sum(ivj)>0){
+      ivj[which(ivj>0)]<-1
+      rle.ivj<-rle(ivj)
+      inf.length[j]<-max(rle.ivj$lengths[which(rle.ivj$values==1)])
+    }else{inf.length[j]<-0}
+    total.inf[i]<-length(which(inf.length>=3))
+  }
+}
+plot(xL.vals,total.inf,type="l")
+
+#resident T cell counts over time
+mean.tr<-matrix(NA,nrow=900,ncol=12)
+for(i in 1:12){
+  for(j in 1:900){
+    tr<-output[[i]][j,12,]
+    mean.tr[j,i]<-mean(tr)
+  }
+}
+plot(c(0,180),c(0,max(mean.tr)),type="n",xlab="time (days)",ylab="mean T_R count")
+for(i in 1:12){
+  points(time,mean.tr[,i],type="l",col=colors[i])
+  points(locator(1),type="n")
+}
+
+prop.inf<-rep(NA,12)
+for(i in 1:12){
+  total.titer<-colSums(output[[i]][,3,])
+  prop.inf[i]<-length(which(total.titer>1000))/4500
+}
+plot(xL.vals,prop.inf,type="o",pch=16,lwd=2,xlab="antigenic distance",ylab="fraction of population infected",ylim=c(0,1))
+
+
+inf.per.host<-matrix(NA,nrow=4500,ncol=12)
+for(i in 1:12){
+  for(j in 1:4500){
+    titer<-output[[i]][,3,j]
+    titer[which(titer>0)]<-1
+    rle.titer<-rle(titer)
+    inf.per.host[j,i]<-length(which(rle.titer$values==1))
+  }
+}
+multiple.inf<-rep(NA,12)
+for(i in 1:12){
+  multiple.inf[i]<-length(which(inf.per.host[,i]>1))
+}
+multiple.inf
+```
